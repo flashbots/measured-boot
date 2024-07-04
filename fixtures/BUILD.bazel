@@ -1,0 +1,9 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "fixtures",
+    srcs = ["fixtures.go"],
+    embedsrcs = ["uki.efi"],
+    importpath = "github.com/flashbots/measured-boot/v2/fixtures",
+    visibility = ["//visibility:public"],
+)
