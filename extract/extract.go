@@ -17,10 +17,26 @@ import (
 	"github.com/flashbots/measured-boot/v2/pesection"
 )
 
-// CopyFrom is a wrapper for systemd-dissect --copy-from.
+// CopyFrom is a wrapper for extracting files from disk images.
+// It tries to use the specified dissectToolchain, and falls back to wic if available.
 func CopyFrom(dissectToolchain, image, path, output string) error {
-	out, err := exec.Command("wic", "cp", image+":1"+path, output).CombinedOutput()
-	//out, err := exec.Command(dissectToolchain, "--copy-from", image, path, output).CombinedOutput()
+	var cmd *exec.Cmd
+	var out []byte
+	var err error
+
+	// First try systemd-dissect if available
+	if dissectToolchain != "" {
+		cmd = exec.Command(dissectToolchain, "--copy-from", image, path, output)
+		out, err = cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		// If systemd-dissect fails, try wic as fallback
+	}
+
+	// Try wic command as fallback
+	cmd = exec.Command("wic", "cp", image+":1"+path, output)
+	out, err = cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to extract %s from %s: %v\n%s", path, image, err, out)
 	}
