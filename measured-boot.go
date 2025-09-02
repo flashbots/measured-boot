@@ -24,11 +24,11 @@ import (
 )
 
 const (
-	ukiPath = "/EFI/Linux/linux.efi"
+	ukiPath    = "/EFI/Linux/linux.efi"
 	sdBootPath = "/EFI/BOOT/bootx64.efi"
 )
 
-func precalculatePCRs(fs afero.Fs, dissectToolchain, imageFile string) (*measure.Simulator, error) {
+func precalculatePCRs(fs afero.Fs, dissectToolchain, imageFile string, directUKI bool) (*measure.Simulator, error) {
 	dir, err := afero.TempDir(fs, "", "con-measure")
 	if err != nil {
 		return nil, err
@@ -37,16 +37,22 @@ func precalculatePCRs(fs afero.Fs, dissectToolchain, imageFile string) (*measure
 
 	simulator := measure.NewDefaultSimulator()
 
-	// extract sd-boot from raw image
-	sdBootFile := filepath.Join(dir, "sd-boot.efi")
-	if err := extract.CopyFrom(dissectToolchain, imageFile, sdBootPath, sdBootFile); err != nil {
-		return nil, fmt.Errorf("failed to extract sd-boot: %v", err)
-	}
+	var ukiFile, sdBootFile string
 
-	// extract UKI from raw image
-	ukiFile := filepath.Join(dir, "uki.efi")
-	if err := extract.CopyFrom(dissectToolchain, imageFile, ukiPath, ukiFile); err != nil {
-		return nil, fmt.Errorf("failed to extract UKI: %v", err)
+	if directUKI {
+		ukiFile = imageFile
+	} else {
+		// extract sd-boot from raw image
+		sdBootFile = filepath.Join(dir, "sd-boot.efi")
+		if err := extract.CopyFrom(dissectToolchain, imageFile, sdBootPath, sdBootFile); err != nil {
+			return nil, fmt.Errorf("failed to extract sd-boot: %v", err)
+		}
+
+		// extract UKI from raw image
+		ukiFile = filepath.Join(dir, "uki.efi")
+		if err := extract.CopyFrom(dissectToolchain, imageFile, ukiPath, ukiFile); err != nil {
+			return nil, fmt.Errorf("failed to extract UKI: %v", err)
+		}
 	}
 
 	// extract section digests from UKI
@@ -61,7 +67,7 @@ func precalculatePCRs(fs afero.Fs, dissectToolchain, imageFile string) (*measure
 		return nil, fmt.Errorf("failed to extract UKI section digests: %v", err)
 	}
 
-	if err := precalculatePCR4(simulator, fs, sdBootFile, ukiFile); err != nil {
+	if err := precalculatePCR4(simulator, fs, sdBootFile, ukiFile, directUKI); err != nil {
 		return nil, err
 	}
 
@@ -104,10 +110,18 @@ func measurePE(fs afero.Fs, peFile string) ([]byte, error) {
 	return measure.Authentihash(f, crypto.SHA256)
 }
 
-func precalculatePCR4(simulator *measure.Simulator, fs afero.Fs, sdBootFile string, ukiFile string) error {
-	sdBootMeasurement, err := measurePE(fs, sdBootFile)
-	if err != nil {
-		return fmt.Errorf("failed to measure sd-boot: %v", err)
+func precalculatePCR4(simulator *measure.Simulator, fs afero.Fs, sdBootFile string, ukiFile string, directUKI bool) error {
+	var bootStages []measure.EFIBootStage
+
+	if !directUKI {
+		sdBootMeasurement, err := measurePE(fs, sdBootFile)
+		if err != nil {
+			return fmt.Errorf("failed to measure sd-boot: %v", err)
+		}
+		bootStages = append(bootStages, measure.EFIBootStage{
+			Name:   "sd-boot",
+			Digest: measure.PCR256(sdBootMeasurement),
+		})
 	}
 
 	ukiMeasurement, err := measurePE(fs, ukiFile)
@@ -129,11 +143,10 @@ func precalculatePCR4(simulator *measure.Simulator, fs afero.Fs, sdBootFile stri
 		return fmt.Errorf("failed to measure linux kernel image: %v", err)
 	}
 
-	bootStages := []measure.EFIBootStage{
-		{Name: "sd-boot", Digest: measure.PCR256(sdBootMeasurement)},
-		{Name: "Unified Kernel Image (UKI)", Digest: measure.PCR256(ukiMeasurement)},
-		{Name: "Linux", Digest: measure.PCR256(linuxMeasurement)},
-	}
+	bootStages = append(bootStages,
+		measure.EFIBootStage{Name: "Unified Kernel Image (UKI)", Digest: measure.PCR256(ukiMeasurement)},
+		measure.EFIBootStage{Name: "Linux", Digest: measure.PCR256(linuxMeasurement)},
+	)
 
 	if err := measure.DescribeBootStages(os.Stderr, bootStages); err != nil {
 		return err
@@ -217,18 +230,19 @@ func writeOutput(fs afero.Fs, outputFile string, simulator *measure.Simulator) e
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "Usage: measured-boot-precalc <image-file> <output-file>")
+	if len(os.Args) < 3 || len(os.Args) > 4 {
+		fmt.Fprintln(os.Stderr, "Usage: measured-boot-precalc <image-file> <output-file> [--direct-uki]")
 		os.Exit(1)
 	}
 
 	imageFile := os.Args[1]
 	outputFile := os.Args[2]
+	directUKI := len(os.Args) == 4 && os.Args[3] == "--direct-uki"
 
 	fs := afero.NewOsFs()
 	dissectToolchain := loadToolchain("DISSECT_TOOLCHAIN", "systemd-dissect")
 
-	simulator, err := precalculatePCRs(fs, dissectToolchain, imageFile)
+	simulator, err := precalculatePCRs(fs, dissectToolchain, imageFile, directUKI)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
